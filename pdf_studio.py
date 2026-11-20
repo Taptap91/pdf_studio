@@ -832,7 +832,7 @@ def watch(srv):
             srv.shutdown(); return
 
 
-APP_ID = "pdf-studio"; VERSION = "52.1"
+APP_ID = "pdf-studio"; VERSION = "52.2"
 PROFILE_IDS = ("40k", "killteam", "aos")   # game styles: add the id here and in PROFILES in the page script (see GAME-TEMPLATES.md)
 SRV = [None]
 
@@ -1256,20 +1256,33 @@ async function renderTagPages(f){
   host.appendChild(wrap);
   // very tall pages (a whole web page printed as one page) are drawn in slices, because one huge canvas won't draw
   const SL=2400,cvs=[];
-  for(let y=0;y<vp.height;y+=SL){const h=Math.min(SL,vp.height-y),cv=document.createElement("canvas");cv.width=Math.floor(vp.width*dpr);cv.height=Math.max(1,Math.floor(h*dpr));cv.style.cssText=`position:absolute;left:0;top:${y}px;width:${width}px;height:${h}px`;wrap.appendChild(cv);cvs.push({cv,y})}
+  for(let y=0;y<vp.height;y+=SL){const h=Math.min(SL,vp.height-y),cv=document.createElement("canvas");cv.width=Math.floor(vp.width*dpr);cv.height=Math.max(1,Math.floor(h*dpr));cv.style.cssText=`position:absolute;left:0;top:${y}px;width:${width}px;height:${h}px`;wrap.appendChild(cv);cvs.push({cv,y,h})}
   wrap.append(ov,pn);
   for(const {cv,y} of cvs)await page.render({canvasContext:cv.getContext("2d"),viewport:vp,transform:[dpr,0,0,dpr,0,-y*dpr]}).promise;
-  const tp={wrap,ov,index:i-1,page};tagPages.push(tp);wireTagPage(tp);
+  const tp={wrap,ov,index:i-1,page,slices:cvs.map(({cv,y,h})=>({cv,yf:y/vp.height,hf:h/vp.height}))};tagPages.push(tp);wireTagPage(tp);
  }
 }
 let tagZoom=1;
 function zoomShow(pct){$("zpct").value=String(Math.round(tagZoom*100))}
+let zoomTok=0;
 async function setZoom(pct){
- const v=Math.round(Math.min(400,Math.max(25,pct))/1)||100;
+ const v=Math.round(Math.min(400,Math.max(25,pct)))||100;
  tagZoom=v/100;zoomShow();
  const host=$("tagview");
- tagLoaded=null;   // the next draw of the pages uses the new size
- if(!host.hidden&&items[sel]){const ratio=host.scrollHeight?host.scrollTop/host.scrollHeight:0;await showTag();host.scrollTop=ratio*host.scrollHeight}
+ if(host.hidden||!tagPages.length)return;
+ // resize the pages that are already drawn: the overlay boxes are stored as percentages of the page, so they stay put
+ const tok=++zoomTok,ratio=host.scrollHeight?host.scrollTop/host.scrollHeight:0;
+ const base=Math.max(300,Math.min(900,host.clientWidth-40)),width=Math.round(base*tagZoom),dpr=window.devicePixelRatio||1;
+ for(const tp of tagPages){
+  const vp1=tp.page.getViewport({scale:1}),vp=tp.page.getViewport({scale:width/vp1.width});
+  tp.wrap.style.width=width+"px";tp.wrap.style.height=vp.height+"px";
+  for(const sl of tp.slices){const y=sl.yf*vp.height,h=sl.hf*vp.height;
+   sl.cv.style.cssText=`position:absolute;left:0;top:${y}px;width:${width}px;height:${h}px`;
+   sl.cv.width=Math.floor(vp.width*dpr);sl.cv.height=Math.max(1,Math.floor(h*dpr));
+   await tp.page.render({canvasContext:sl.cv.getContext("2d"),viewport:vp,transform:[dpr,0,0,dpr,0,-y*dpr]}).promise;
+   if(tok!==zoomTok)return}
+ }
+ host.scrollTop=ratio*host.scrollHeight;paintTags();
 }
 $("zin").onclick=()=>setZoom(Math.round(tagZoom*100)+10);
 $("zout").onclick=()=>setZoom(Math.round(tagZoom*100)-10);
@@ -1337,7 +1350,7 @@ async function reconcile(m,tp){
    const f=inter(P,C)/area(C);if(f<0.5||f>0.999)return;
    const x0=Math.min(P.x,C.x),y0=Math.min(P.y,C.y),x1=Math.max(P.x+P.w,C.x+C.w),y1=Math.max(P.y+P.h,C.y+C.h);P.x=x0;P.y=y0;P.w=x1-x0;P.h=y1-y0;grown.add(P)};
   others.forEach(o=>{const ro=TAG_RANK[o.k];if(ro>rk)grow(o,m);else if(ro<rk)grow(m,o)});
-  for(const P of grown){if(P.k==="para"){await fitBox(P,tp);others.concat([m]).forEach(o=>{if(o!==P&&TAG_RANK[o.k]<TAG_RANK.para)grow(P,o)})}}
+  for(const P of grown){if(P.k==="para"){others.concat([m]).forEach(o=>{if(o!==P&&TAG_RANK[o.k]<TAG_RANK.para)grow(P,o)})}}   // a grown box just takes in what it holds; it is not re-snapped to the text below
   paintTags();
  }catch(e){}
 }
@@ -1366,7 +1379,7 @@ async function ensureData(tp){
    tp.data={W:vp.width,H:vp.height,lines:groupLines(tc,vp.height),imgs,shapes};
   }
 }
-const SNAP_TOL=6;   // points: how far a snapped box may grow beyond the box the user drew
+const SNAP_TOL=0;   // points: a snapped box never grows beyond the box the user drew (it can only tighten onto text inside it)
 async function fitBox(m,tp){
  try{
   await ensureData(tp);
